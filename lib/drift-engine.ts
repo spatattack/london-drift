@@ -30,7 +30,7 @@ export type CandidateRoute = {
   durationMinutes: number;
   distanceMetres: number;
   signals: RouteSignals;
-  geometry: GeoJSON.LineString;
+  geometry: LineString;
   waypointIds: string[];
 };
 
@@ -84,3 +84,4 @@ export function walkingRadiusMetres(durationMinutes: number): number {
   const exploratoryPathFactor = 0.68;
   return Math.round(durationMinutes * walkingSpeedMetresPerMinute * exploratoryPathFactor);
 }
+import type { LineString } from "geojson";
