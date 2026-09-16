@@ -7,6 +7,19 @@ import { modeDetails } from "@/lib/london";
 
 type Props = { route: DriftRoute | null };
 
+const osmStyle = {
+  version: 8 as const,
+  sources: {
+    osm: {
+      type: "raster" as const,
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution: "© OpenStreetMap contributors",
+    },
+  },
+  layers: [{ id: "osm", type: "raster" as const, source: "osm" }],
+};
+
 function boundsFor(coordinates: number[][]) {
   return coordinates.reduce(
     (bounds, [lng, lat]) => ({
@@ -86,7 +99,11 @@ export function DriftMap({ route }: Props) {
       mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
-      map.on("load", () => {
+      let routeAdded = false;
+      let usingFallback = false;
+      const addRoute = () => {
+        if (routeAdded) return;
+        routeAdded = true;
         map.addSource("drift-route", { type: "geojson", data: { type: "Feature", properties: {}, geometry: route.geometry } });
         map.addLayer({ id: "drift-outline", type: "line", source: "drift-route", paint: { "line-color": "#fffaf0", "line-width": 10, "line-opacity": 0.92 } });
         map.addLayer({ id: "drift-line", type: "line", source: "drift-route", paint: { "line-color": modeDetails[route.mode].colour, "line-width": 6 } });
@@ -98,6 +115,16 @@ export function DriftMap({ route }: Props) {
           new maplibregl.Marker({ element: marker }).setLngLat(stop.coordinates).addTo(map);
         });
         map.fitBounds([[bounds.west, bounds.south], [bounds.east, bounds.north]], { padding: 64, duration: 0 });
+      };
+      map.on("load", addRoute);
+      map.on("error", (event) => {
+        const message = event.error?.message?.toLowerCase() ?? "";
+        if (mapKey && !usingFallback && /401|403|404|style|tile|source/.test(message)) {
+          usingFallback = true;
+          routeAdded = false;
+          map.setStyle(osmStyle);
+          map.once("style.load", addRoute);
+        }
       });
     });
 
