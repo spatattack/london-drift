@@ -7,7 +7,18 @@ import { modeDetails } from "@/lib/london";
 
 type Props = { route: DriftRoute | null };
 
-const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+const MAP_STYLE = {
+  version: 8 as const,
+  sources: {
+    carto: {
+      type: "raster" as const,
+      tiles: ["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"],
+      tileSize: 256,
+      attribution: "© OpenStreetMap contributors © CARTO",
+    },
+  },
+  layers: [{ id: "carto", type: "raster" as const, source: "carto" }],
+};
 
 function boundsFor(coordinates: number[][]) {
   return coordinates.reduce(
