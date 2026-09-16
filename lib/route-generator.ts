@@ -4,7 +4,6 @@ import {
   isInLondon,
   lineDistance,
   modeDetails,
-  pointAlongLine,
   type Coordinate,
   type DriftRoute,
   type DriftStop,
@@ -25,6 +24,16 @@ type ReverseGeocodeBody = {
   features?: Array<{ text?: string; place_name?: string }>;
 };
 
+type MapTilerSearchBody = {
+  features?: Array<{
+    id?: string;
+    text?: string;
+    place_name?: string;
+    center?: Coordinate;
+    geometry?: { coordinates?: Coordinate };
+  }>;
+};
+
 type OverpassElement = {
   lat?: number;
   lon?: number;
@@ -34,7 +43,8 @@ type OverpassElement = {
 
 type OverpassBody = { elements?: OverpassElement[] };
 
-type NearbyPlace = { name: string; tags: Record<string, string> };
+type NearbyPlace = { name: string; tags: Record<string, string>; coordinates: Coordinate; fitScore: number };
+type CandidatePlan = { points: Coordinate[]; places: Array<NearbyPlace | null> };
 type NominatimReverseBody = { name?: string; display_name?: string; address?: { road?: string; neighbourhood?: string; suburb?: string } };
 
 const modePlaceSignals: Record<DriftMode, { keys: string[]; keywords: string[]; label: string }> = {
@@ -60,6 +70,20 @@ const stopNotes = [
   "A good place to decide whether to linger.",
 ];
 
+const modeStopNotes: Record<DriftMode, string[]> = {
+  surprise: ["Take the less obvious approach and notice what changes.", "A useful interruption in the rhythm of the walk.", "Look back before moving on; the view works differently in reverse."],
+  quiet: ["Let the quieter street set the pace here.", "Pause where the city noise falls away.", "Use the softer edge of this place before continuing."],
+  architecture: ["Look up: the useful detail is above eye level.", "Compare the old fabric with the intervention beside it.", "Walk around the edge before deciding on the best view."],
+  water: ["Follow the waterline rather than the quickest pavement.", "Pause for the change in light and reflection.", "Notice how the route reconnects water and street."],
+  old: ["Read the older street line before moving on.", "Look for the surviving detail rather than the headline sight.", "This is a good point to notice what the modern city grew around."],
+  industrial: ["Follow the working edge rather than the polished frontage.", "Notice the seams: arches, yards, servicing and rail.", "The route changes texture around this piece of infrastructure."],
+  green: ["Take the green edge instead of cutting straight through.", "Slow down where the canopy or open ground changes.", "Use this patch of breathing room before returning to the street."],
+  weird: ["Do not resolve the oddness too quickly.", "Walk around it once; the explanation may get less obvious.", "A small London glitch worth keeping in the route."],
+  photography: ["Check the light from both directions before continuing.", "Use the lines and layers here rather than searching for a postcard view.", "Step back: the wider frame is stronger than the detail."],
+  pubs: ["A useful door to remember, whether or not you stop now.", "Let the street decide whether this is a pause or a waypoint.", "Good territory for an unhurried detour."],
+  night: ["Stay with the active, well-connected edge here.", "Use the lit frontage as the next anchor.", "A practical point to reassess the route after dark."],
+};
+
 function hash(input: string) {
   let value = 2166136261;
   for (const character of input) {
@@ -75,10 +99,10 @@ function offset(origin: Coordinate, eastMetres: number, northMetres: number): Co
   return [lng, lat];
 }
 
-function candidateWaypoints(origin: Coordinate, duration: number, mode: DriftMode, variant: number) {
-  const seed = hash(`${origin.join(",")}-${duration}-${mode}-${variant}`);
+function candidateWaypoints(origin: Coordinate, duration: number, mode: DriftMode, variant: number, runSeed: number) {
+  const seed = hash(`${origin.join(",")}-${duration}-${mode}-${variant}-${runSeed}`);
   const bearing = ((seed % 360) * Math.PI) / 180;
-  const radius = walkingRadiusMetres(duration) * (0.54 + variant * 0.035);
+  const radius = walkingRadiusMetres(duration) * (0.68 + variant * 0.04);
   const bend = modeDetails[mode].turn;
   const count = duration <= 30 ? 2 : duration <= 60 ? 3 : duration <= 90 ? 4 : 5;
   const points: Coordinate[] = [origin];
@@ -180,42 +204,125 @@ function elementCoordinate(element: OverpassElement): Coordinate | null {
   return typeof lng === "number" && typeof lat === "number" ? [lng, lat] : null;
 }
 
-function placeScore(element: OverpassElement, point: Coordinate) {
-  const tags = element.tags ?? {};
-  const coordinate = elementCoordinate(element);
-  if (!coordinate || !tags.name) return -Infinity;
-
-  const distance = haversineMetres(point, coordinate);
-  if (distance > 180) return -Infinity;
-
-  // Prefer named things people can actually notice over generic road geometry.
-  const categoryBonus = ["tourism", "historic", "amenity", "shop", "leisure", "natural", "man_made", "craft", "railway"]
-    .some((key) => Boolean(tags[key])) ? 240 : 0;
-  const roadPenalty = tags.highway ? 140 : 0;
-  const transitBonus = tags.public_transport || tags.railway ? 40 : 0;
-  return categoryBonus + transitBonus - roadPenalty - distance;
+function modeFitScore(name: string, tags: Record<string, string>, mode: DriftMode) {
+  if (tags.highway || tags.route === "road" || /(^|\s)[AM]\d+\b|road \(great britain\)/i.test(name)) return 0;
+  const signal = modePlaceSignals[mode];
+  const searchable = `${name} ${Object.values(tags).join(" ")}`.toLowerCase();
+  const keyMatches = signal.keys.filter((key) => Boolean(tags[key])).length;
+  const keywordMatches = signal.keywords.filter((keyword) => searchable.includes(keyword)).length;
+  const notable = ["tourism", "historic", "amenity", "leisure", "natural", "man_made", "craft", "waterway", "railway"]
+    .filter((key) => Boolean(tags[key])).length;
+  return Math.min(98, 38 + Math.min(2, keyMatches) * 20 + Math.min(2, keywordMatches) * 14 + Math.min(3, notable) * 5);
 }
 
-async function nearbyPlace(point: Coordinate): Promise<NearbyPlace | null> {
-  const query = `[out:json][timeout:8];nwr(around:180,${point[1]},${point[0]})[name];out center tags 80;`;
+async function themedPlaces(origin: Coordinate, radius: number, mode: DriftMode): Promise<NearbyPlace[]> {
+  const mapTilerKey = process.env.NEXT_PUBLIC_MAPTILER_KEY;
+  if (mapTilerKey) {
+    const latRadius = radius / 111_320;
+    const lngRadius = radius / (111_320 * Math.cos((origin[1] * Math.PI) / 180));
+    const bbox = [origin[0] - lngRadius, origin[1] - latRadius, origin[0] + lngRadius, origin[1] + latRadius].join(",");
+    const searches = modePlaceSignals[mode].keywords.slice(0, 3);
+    const results = await Promise.all(searches.map(async (keyword) => {
+      try {
+        const params = new URLSearchParams({
+          key: mapTilerKey,
+          bbox,
+          proximity: origin.join(","),
+          types: "poi",
+          limit: "10",
+          language: "en",
+        });
+        const response = await fetch(`https://api.maptiler.com/geocoding/${encodeURIComponent(keyword)}.json?${params}`, {
+          signal: AbortSignal.timeout(4_000),
+          next: { revalidate: 3_600 },
+        });
+        if (!response.ok) return [];
+        const body = await response.json() as MapTilerSearchBody;
+        return (body.features ?? []).flatMap((feature): NearbyPlace[] => {
+          const coordinates = feature.center ?? feature.geometry?.coordinates;
+          const name = feature.text?.trim() || feature.place_name?.split(",")[0]?.trim();
+          if (!coordinates || !name || !isInLondon(coordinates) || haversineMetres(origin, coordinates) > radius) return [];
+          const tags = { tourism: "poi", search: keyword };
+          return [{ name, coordinates, tags, fitScore: modeFitScore(name, tags, mode) }];
+        });
+      } catch {
+        return [];
+      }
+    }));
+    const unique = new Map<string, NearbyPlace>();
+    for (const place of results.flat()) unique.set(place.name.toLowerCase(), place);
+    if (unique.size > 0) return [...unique.values()].sort((a, b) => b.fitScore - a.fitScore);
+  }
+
+  const keys = [...new Set(modePlaceSignals[mode].keys)];
+  const clauses = keys.map((key) => `nwr(around:${Math.round(radius)},${origin[1]},${origin[0]})[name][${key}];`).join("");
+  const query = `[out:json][timeout:8];(${clauses});out center tags 220;`;
+
   for (const endpoint of ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]) {
     try {
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "text/plain", "User-Agent": "LondonDrift/0.1 (non-commercial alpha)" },
         body: query,
-        signal: AbortSignal.timeout(7_000),
+        signal: AbortSignal.timeout(6_000),
       });
       if (!response.ok) continue;
       const body = await response.json() as OverpassBody;
-      const best = (body.elements ?? []).sort((a, b) => placeScore(b, point) - placeScore(a, point))[0];
-      const name = best?.tags?.name?.trim();
-      if (name) return { name, tags: best?.tags ?? {} };
+      const unique = new Map<string, NearbyPlace>();
+
+      for (const element of body.elements ?? []) {
+        const name = element.tags?.name?.trim();
+        const coordinates = elementCoordinate(element);
+        if (!name || !coordinates || !isInLondon(coordinates)) continue;
+        const distance = haversineMetres(origin, coordinates);
+        if (distance < 180 || distance > radius) continue;
+        const tags = element.tags ?? {};
+        const fitScore = modeFitScore(name, tags, mode);
+        if (fitScore < 38) continue;
+        const key = name.toLowerCase();
+        const existing = unique.get(key);
+        if (!existing || fitScore > existing.fitScore) unique.set(key, { name, tags, coordinates, fitScore });
+      }
+
+      return [...unique.values()].sort((a, b) => b.fitScore - a.fitScore).slice(0, 180);
     } catch {
       // Try the next public Overpass instance.
     }
   }
-  return null;
+  return [];
+}
+
+function selectPlacesForTargets(candidates: NearbyPlace[], targets: Coordinate[], seed: number) {
+  const used = new Set<string>();
+  const selected: Array<NearbyPlace | null> = [];
+
+  for (const [index, target] of targets.entries()) {
+    const previous = selected.at(-1)?.coordinates;
+    const ranked = candidates
+      .filter((candidate) => !used.has(candidate.name.toLowerCase()))
+      .map((candidate) => {
+        const targetDistance = haversineMetres(candidate.coordinates, target);
+        const spacing = previous ? haversineMetres(candidate.coordinates, previous) : Infinity;
+        const jitter = hash(`${seed}-${index}-${candidate.name}`) % 55;
+        const spacingPenalty = spacing < 240 ? 180 : 0;
+        return { candidate, targetDistance, score: candidate.fitScore * 6 + jitter - targetDistance / 5 - spacingPenalty };
+      })
+      .filter(({ targetDistance }) => targetDistance <= 1_500)
+      .sort((a, b) => b.score - a.score);
+    const choice = ranked[0]?.candidate ?? null;
+    selected.push(choice);
+    if (choice) used.add(choice.name.toLowerCase());
+  }
+  return selected;
+}
+
+function buildPlan(origin: Coordinate, duration: number, mode: DriftMode, variant: number, runSeed: number, candidates: NearbyPlace[]): CandidatePlan {
+  const targets = candidateWaypoints(origin, duration, mode, variant, runSeed).slice(1);
+  const places = selectPlacesForTargets(candidates, targets, runSeed + variant);
+  return {
+    places,
+    points: [origin, ...targets.map((target, index) => places[index]?.coordinates ?? target)],
+  };
 }
 
 function scorePlace(place: NearbyPlace | null, fallbackName: string, mode: DriftMode) {
@@ -224,59 +331,87 @@ function scorePlace(place: NearbyPlace | null, fallbackName: string, mode: Drift
   const name = (place?.name ?? fallbackName).toLowerCase();
   const keyMatch = signal.keys.some((key) => Boolean(tags[key]));
   const keywordMatch = signal.keywords.some((keyword) => name.includes(keyword) || Object.values(tags).some((value) => value.toLowerCase().includes(keyword)));
-  const score = 48 + (keyMatch ? 24 : 0) + (keywordMatch ? 18 : 0) + (place ? 8 : 0);
+  const score = place?.fitScore ?? (48 + (keyMatch ? 24 : 0) + (keywordMatch ? 18 : 0));
   return {
     fitScore: Math.min(98, score),
     fitReason: keyMatch || keywordMatch ? `A named place with a strong ${signal.label} signal.` : `A named place that adds texture to the ${signal.label} route.`,
   };
 }
 
-async function buildStops(coordinates: Coordinate[], duration: number, mode: DriftMode) {
-  const count = duration <= 30 ? 2 : duration <= 60 ? 3 : duration <= 90 ? 4 : 5;
-  const raw = Array.from({ length: count }, (_, index) => {
-    const progress = (index + 1) / (count + 1);
-    return { progress, coordinates: pointAlongLine(coordinates, progress) };
-  });
+function progressNearPoint(coordinates: Coordinate[], point: Coordinate) {
+  const total = lineDistance(coordinates);
+  let travelled = 0;
+  let closest = { distance: Infinity, progress: 0 };
+  for (let index = 0; index < coordinates.length; index += 1) {
+    if (index > 0) travelled += haversineMetres(coordinates[index - 1], coordinates[index]);
+    const distance = haversineMetres(coordinates[index], point);
+    if (distance < closest.distance) closest = { distance, progress: total > 0 ? travelled / total : 0 };
+  }
+  return closest.progress;
+}
 
-  return Promise.all(raw.map(async ({ progress, coordinates }, index): Promise<DriftStop> => {
-    const place = await nearbyPlace(coordinates);
-    const fallbackName = await reverseName(coordinates, `Drift marker ${index + 1}`);
-    const name = place?.name ?? fallbackName;
+async function buildStops(coordinates: Coordinate[], duration: number, mode: DriftMode, plan: CandidatePlan) {
+  const names = await Promise.all(plan.places.map((place, index) => (
+    place ? Promise.resolve(place.name) : reverseName(plan.points[index + 1], `Drift marker ${index + 1}`)
+  )));
+  const usedNames = new Set<string>();
+  const stops: DriftStop[] = [];
+
+  for (const [index, plannedPoint] of plan.points.slice(1).entries()) {
+    const place = plan.places[index];
+    const stopCoordinates = place?.coordinates ?? plannedPoint;
+    let name = names[index];
+    if (usedNames.has(name.toLowerCase())) name = `Drift marker ${index + 1}`;
+    usedNames.add(name.toLowerCase());
+    const progress = progressNearPoint(coordinates, stopCoordinates);
     const fit = scorePlace(place, name, mode);
-    return {
+    stops.push({
       name,
-      note: stopNotes[index % stopNotes.length],
+      note: modeStopNotes[mode][index % modeStopNotes[mode].length] ?? stopNotes[index % stopNotes.length],
       minute: Math.max(1, Math.round(duration * progress)),
-      coordinates,
+      coordinates: stopCoordinates,
       ...fit,
-    };
-  }));
+    });
+  }
+
+  return stops.sort((a, b) => a.minute - b.minute);
 }
 
 export async function generateDrift(start: PlaceSuggestion, duration: number, mode: DriftMode): Promise<DriftRoute> {
   const desiredDistance = duration * WALKING_METRES_PER_MINUTE;
   const apiKey = process.env.OPENROUTESERVICE_API_KEY;
-  let best: { coordinates: Coordinate[]; distance: number; duration: number } | null = null;
+  const runSeed = hash(`${Date.now()}-${Math.random()}-${start.id}-${mode}`);
+  const searchRadius = Math.min(7_000, Math.max(1_400, walkingRadiusMetres(duration) * 1.08));
+  const places = await themedPlaces(start.coordinates, searchRadius, mode);
+  const plans = [0, 1, 2].map((variant) => buildPlan(start.coordinates, duration, mode, variant, runSeed, places));
+  let best: { coordinates: Coordinate[]; distance: number; duration: number; plan: CandidatePlan } | null = null;
 
   if (apiKey) {
     const candidates = await Promise.all(
-      [0, 1, 2].map((variant) => requestOrs(candidateWaypoints(start.coordinates, duration, mode, variant), apiKey).catch(() => null)),
+      plans.map(async (plan) => {
+        const route = await requestOrs(plan.points, apiKey).catch(() => null);
+        return route ? { ...route, plan } : null;
+      }),
     );
     best = candidates
       .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
       .sort((a, b) => Math.abs(a.duration / 60 - duration) - Math.abs(b.duration / 60 - duration))[0] ?? null;
   }
 
-  const coordinates = best?.coordinates ?? previewLine(candidateWaypoints(start.coordinates, duration, mode, 1), desiredDistance);
+  const fallback = plans
+    .map((plan) => ({ plan, distance: lineDistance(plan.points) }))
+    .sort((a, b) => Math.abs(a.distance - desiredDistance) - Math.abs(b.distance - desiredDistance))[0];
+  const selectedPlan = best?.plan ?? fallback.plan;
+  const coordinates = best?.coordinates ?? previewLine(selectedPlan.points, fallback.distance);
   const distance = Math.round(best?.distance ?? lineDistance(coordinates));
   const actualMinutes = Math.round(best ? best.duration / 60 : distance / WALKING_METRES_PER_MINUTE);
-  const stops = await buildStops(coordinates, actualMinutes, mode);
+  const stops = await buildStops(coordinates, actualMinutes, mode, selectedPlan);
   const endCoordinates = coordinates.at(-1)!;
   const end = await reverseName(endCoordinates, "Somewhere worth continuing from");
   const detail = modeDetails[mode];
 
   return {
-    id: `${Date.now().toString(36)}-${hash(`${start.id}-${duration}-${mode}`).toString(36)}`,
+    id: `${Date.now().toString(36)}-${runSeed.toString(36)}`,
     title: detail.title,
     summary: detail.summary,
     mode,
