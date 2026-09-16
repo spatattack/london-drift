@@ -9,6 +9,23 @@ import type { DriftMode } from "@/lib/drift-engine";
 const durations = [30, 60, 90, 120];
 const modes = Object.entries(modeDetails) as [DriftMode, (typeof modeDetails)[DriftMode]][];
 
+function googleMapsDirectionsUrl(route: DriftRoute) {
+  const destination = route.geometry.coordinates.at(-1) ?? route.start.coordinates;
+  const asLatLng = ([lng, lat]: number[]) => `${lat},${lng}`;
+  const params = new URLSearchParams({
+    api: "1",
+    origin: asLatLng(route.start.coordinates),
+    destination: asLatLng(destination),
+    travelmode: "walking",
+  });
+
+  if (route.stops.length > 0) {
+    params.set("waypoints", route.stops.map((stop) => asLatLng(stop.coordinates)).join("|"));
+  }
+
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
 export default function Home() {
   const [query, setQuery] = useState("");
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>(fallbackPlaces.slice(0, 5));
@@ -210,7 +227,7 @@ export default function Home() {
               <div className="route-actions">
                 <button type="button" onClick={generate}><RefreshCw size={17} /> Another route</button>
                 <button type="button" onClick={share}><Share2 size={17} /> {copied ? "Copied" : "Share"}</button>
-                <a href={`https://www.google.com/maps/dir/?api=1&origin=${route.start.coordinates[1]},${route.start.coordinates[0]}&destination=${route.geometry.coordinates.at(-1)?.[1]},${route.geometry.coordinates.at(-1)?.[0]}&travelmode=walking`} target="_blank" rel="noreferrer"><Navigation size={17} /> Open directions</a>
+                <a href={googleMapsDirectionsUrl(route)} target="_blank" rel="noreferrer"><Navigation size={17} /> Open directions</a>
               </div>
             </>
           ) : <div className="route-placeholder"><Crosshair size={24} /><p>Choose a start, a time and a mood. Your generated route—not a canned example—will land here.</p></div>}

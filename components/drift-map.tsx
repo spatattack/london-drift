@@ -109,8 +109,22 @@ export function DriftMap({ route }: Props) {
         if (routeAdded) return;
         routeAdded = true;
         map.addSource("drift-route", { type: "geojson", data: { type: "Feature", properties: {}, geometry: route.geometry } });
-        map.addLayer({ id: "drift-outline", type: "line", source: "drift-route", paint: { "line-color": "#fffaf0", "line-width": 10, "line-opacity": 0.92 } });
-        map.addLayer({ id: "drift-line", type: "line", source: "drift-route", paint: { "line-color": modeDetails[route.mode].colour, "line-width": 6 } });
+        map.addLayer({
+          id: "drift-outline",
+          type: "line",
+          source: "drift-route",
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: { "line-color": "#18221e", "line-width": 12, "line-opacity": 0.9 },
+        });
+        map.addLayer({
+          id: "drift-line",
+          type: "line",
+          source: "drift-route",
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: { "line-color": modeDetails[route.mode].colour, "line-width": 7, "line-opacity": 1 },
+        });
+        map.moveLayer("drift-outline");
+        map.moveLayer("drift-line");
         new maplibregl.Marker({ color: "#18221e" }).setLngLat(route.start.coordinates).addTo(map);
         route.stops.forEach((stop, index) => {
           const marker = document.createElement("div");
