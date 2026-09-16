@@ -275,13 +275,13 @@ async function themedPlaces(origin: Coordinate, radius: number, mode: DriftMode)
   const clauses = keys.map((key) => `nwr(around:${Math.round(radius)},${origin[1]},${origin[0]})[name][${key}];`).join("");
   const query = `[out:json][timeout:8];(${clauses});out center tags 220;`;
 
-  for (const endpoint of ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]) {
+  for (const endpoint of ["https://maps.mail.ru/osm/tools/overpass/api/interpreter", "https://overpass.private.coffee/api/interpreter"]) {
     try {
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "Content-Type": "text/plain", "User-Agent": "LondonDrift/0.1 (non-commercial alpha)" },
-        body: query,
-        signal: AbortSignal.timeout(6_000),
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "LondonDrift/0.1 (non-commercial alpha)" },
+        body: new URLSearchParams({ data: query }).toString(),
+        signal: AbortSignal.timeout(9_000),
       });
       if (!response.ok) continue;
       const body = await response.json() as OverpassBody;
