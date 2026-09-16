@@ -10,14 +10,14 @@ type Props = { route: DriftRoute | null };
 const MAP_STYLE = {
   version: 8 as const,
   sources: {
-    carto: {
+    osm: {
       type: "raster" as const,
-      tiles: ["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"],
+      tiles: ["https://tile.openstreetmap.de/{z}/{x}/{y}.png"],
       tileSize: 256,
-      attribution: "© OpenStreetMap contributors © CARTO",
+      attribution: "© OpenStreetMap contributors",
     },
   },
-  layers: [{ id: "carto", type: "raster" as const, source: "carto" }],
+  layers: [{ id: "osm", type: "raster" as const, source: "osm" }],
 };
 
 function boundsFor(coordinates: number[][]) {
