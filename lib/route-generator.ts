@@ -25,6 +25,15 @@ type ReverseGeocodeBody = {
   features?: Array<{ text?: string; place_name?: string }>;
 };
 
+type OverpassElement = {
+  lat?: number;
+  lon?: number;
+  center?: { lat?: number; lon?: number };
+  tags?: Record<string, string>;
+};
+
+type OverpassBody = { elements?: OverpassElement[] };
+
 const stopNotes = [
   "Take the less obvious side street here.",
   "A useful pause for texture and a change of scale.",
@@ -130,6 +139,47 @@ async function reverseName(point: Coordinate, fallback: string) {
   }
 }
 
+function elementCoordinate(element: OverpassElement): Coordinate | null {
+  const lng = element.lon ?? element.center?.lon;
+  const lat = element.lat ?? element.center?.lat;
+  return typeof lng === "number" && typeof lat === "number" ? [lng, lat] : null;
+}
+
+function placeScore(element: OverpassElement, point: Coordinate) {
+  const tags = element.tags ?? {};
+  const coordinate = elementCoordinate(element);
+  if (!coordinate || !tags.name) return -Infinity;
+
+  const distance = haversineMetres(point, coordinate);
+  if (distance > 180) return -Infinity;
+
+  // Prefer named things people can actually notice over generic road geometry.
+  const categoryBonus = ["tourism", "historic", "amenity", "shop", "leisure", "natural", "man_made", "craft", "railway"]
+    .some((key) => Boolean(tags[key])) ? 240 : 0;
+  const roadPenalty = tags.highway ? 140 : 0;
+  const transitBonus = tags.public_transport || tags.railway ? 40 : 0;
+  return categoryBonus + transitBonus - roadPenalty - distance;
+}
+
+async function nearbyPlaceName(point: Coordinate): Promise<string | null> {
+  const query = `[out:json][timeout:8];nwr(around:180,${point[1]},${point[0]})[name];out center tags 80;`;
+  try {
+    const response = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", "User-Agent": "LondonDrift/0.1 (non-commercial alpha)" },
+      body: query,
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) return null;
+    const body = await response.json() as OverpassBody;
+    const best = (body.elements ?? []).sort((a, b) => placeScore(b, point) - placeScore(a, point))[0];
+    const name = best?.tags?.name?.trim();
+    return name || null;
+  } catch {
+    return null;
+  }
+}
+
 async function buildStops(coordinates: Coordinate[], duration: number) {
   const count = duration <= 30 ? 2 : duration <= 60 ? 3 : duration <= 90 ? 4 : 5;
   const raw = Array.from({ length: count }, (_, index) => {
@@ -138,7 +188,7 @@ async function buildStops(coordinates: Coordinate[], duration: number) {
   });
 
   return Promise.all(raw.map(async ({ progress, coordinates }, index): Promise<DriftStop> => ({
-    name: await reverseName(coordinates, `Drift marker ${index + 1}`),
+    name: await nearbyPlaceName(coordinates) ?? await reverseName(coordinates, `Drift marker ${index + 1}`),
     note: stopNotes[index % stopNotes.length],
     minute: Math.max(1, Math.round(duration * progress)),
     coordinates,
