@@ -31,6 +31,7 @@ type MapTilerSearchBody = {
     place_name?: string;
     center?: Coordinate;
     geometry?: { coordinates?: Coordinate };
+    properties?: { category?: string };
   }>;
 };
 
@@ -55,10 +56,24 @@ const modePlaceSignals: Record<DriftMode, { keys: string[]; keywords: string[]; 
   old: { keys: ["historic", "heritage", "building", "place_of_worship"], keywords: ["old", "church", "chapel", "hall", "market", "court"], label: "old London" },
   industrial: { keys: ["industrial", "man_made", "craft", "railway"], keywords: ["works", "yard", "arches", "depot", "factory", "rail"], label: "post-industrial texture" },
   green: { keys: ["leisure", "natural", "landuse"], keywords: ["park", "garden", "common", "wood", "meadow", "green"], label: "green space" },
-  weird: { keys: ["artwork_type", "man_made", "historic", "railway", "amenity"], keywords: ["mural", "sculpture", "tower", "tunnel", "arches", "station", "market"], label: "weirdness" },
+  weird: { keys: ["artwork_type", "man_made", "historic", "railway", "amenity"], keywords: ["mural", "sculpture", "public art", "tunnel", "arches", "station", "market"], label: "weirdness" },
   photography: { keys: ["tourism", "artwork_type", "man_made", "building", "natural"], keywords: ["viewpoint", "mural", "gallery", "bridge", "tower", "station"], label: "photography" },
   pubs: { keys: ["amenity", "shop", "tourism"], keywords: ["pub", "tavern", "inn", "brewery", "bar", "market"], label: "a useful wander" },
   night: { keys: ["amenity", "shop", "public_transport", "railway"], keywords: ["station", "market", "cinema", "theatre", "bar"], label: "night-time usefulness" },
+};
+
+const modePlaceSearches: Record<DriftMode, string[]> = {
+  surprise: ["art gallery", "market", "museum"],
+  quiet: ["garden", "cemetery", "nature reserve"],
+  architecture: ["listed building", "architecture", "church"],
+  water: ["canal lock", "marina", "river"],
+  old: ["historic site", "church", "market"],
+  industrial: ["railway arches", "brewery", "depot"],
+  green: ["park", "garden", "nature reserve"],
+  weird: ["mural", "sculpture", "public art"],
+  photography: ["viewpoint", "bridge", "art gallery"],
+  pubs: ["pub", "brewery", "market"],
+  night: ["cinema", "theatre", "bar"],
 };
 
 const stopNotes = [
@@ -221,7 +236,7 @@ async function themedPlaces(origin: Coordinate, radius: number, mode: DriftMode)
     const latRadius = radius / 111_320;
     const lngRadius = radius / (111_320 * Math.cos((origin[1] * Math.PI) / 180));
     const bbox = [origin[0] - lngRadius, origin[1] - latRadius, origin[0] + lngRadius, origin[1] + latRadius].join(",");
-    const searches = modePlaceSignals[mode].keywords.slice(0, 3);
+    const searches = modePlaceSearches[mode];
     const results = await Promise.all(searches.map(async (keyword) => {
       try {
         const params = new URLSearchParams({
@@ -242,7 +257,9 @@ async function themedPlaces(origin: Coordinate, radius: number, mode: DriftMode)
           const coordinates = feature.center ?? feature.geometry?.coordinates;
           const name = feature.text?.trim() || feature.place_name?.split(",")[0]?.trim();
           if (!coordinates || !name || !isInLondon(coordinates) || haversineMetres(origin, coordinates) > radius) return [];
-          const tags = { tourism: "poi", search: keyword };
+          const irrelevantBusiness = /pizza|restaurant|café|cafe|coffee|takeaway|pharmacy|supermarket|convenience/i.test(name);
+          if (irrelevantBusiness && !["surprise", "pubs", "night"].includes(mode)) return [];
+          const tags = { tourism: "poi", search: keyword, category: feature.properties?.category ?? "" };
           return [{ name, coordinates, tags, fitScore: modeFitScore(name, tags, mode) }];
         });
       } catch {
@@ -307,7 +324,7 @@ function selectPlacesForTargets(candidates: NearbyPlace[], targets: Coordinate[]
         const spacingPenalty = spacing < 240 ? 180 : 0;
         return { candidate, targetDistance, score: candidate.fitScore * 6 + jitter - targetDistance / 5 - spacingPenalty };
       })
-      .filter(({ targetDistance }) => targetDistance <= 1_500)
+      .filter(({ targetDistance }) => targetDistance <= 750)
       .sort((a, b) => b.score - a.score);
     const choice = ranked[0]?.candidate ?? null;
     selected.push(choice);
