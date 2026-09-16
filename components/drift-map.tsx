@@ -12,7 +12,11 @@ const MAP_STYLE = {
   sources: {
     osm: {
       type: "raster" as const,
-      tiles: ["https://tile.openstreetmap.de/{z}/{x}/{y}.png"],
+      tiles: [
+        "https://a.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+        "https://b.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+        "https://c.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+      ],
       tileSize: 256,
       attribution: "© OpenStreetMap contributors",
     },
