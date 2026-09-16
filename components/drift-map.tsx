@@ -1,24 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Map as MapLibreMap } from "maplibre-gl";
 import type { DriftRoute } from "@/lib/london";
 import { modeDetails } from "@/lib/london";
 
 type Props = { route: DriftRoute | null };
 
-const osmStyle = {
-  version: 8 as const,
-  sources: {
-    osm: {
-      type: "raster" as const,
-      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-      tileSize: 256,
-      attribution: "© OpenStreetMap contributors",
-    },
-  },
-  layers: [{ id: "osm", type: "raster" as const, source: "osm" }],
-};
+const MAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
 
 function boundsFor(coordinates: number[][]) {
   return coordinates.reduce(
@@ -70,7 +59,7 @@ function PreviewMap({ route }: { route: DriftRoute }) {
         const [x, y] = project(point);
         return <circle key={index} cx={x} cy={y} r="8" fill={index === 0 ? "#18221e" : colour} stroke="#fffaf0" strokeWidth="3" />;
       })}
-      <text x="28" y="474" className="preview-label">PREVIEW MAP · ADD MAPTILER FOR LIVE STREETS</text>
+      <text x="28" y="474" className="preview-label">MAP PREVIEW · LIVE MAP DATA UNAVAILABLE</text>
     </svg>
   );
 }
@@ -78,11 +67,12 @@ function PreviewMap({ route }: { route: DriftRoute }) {
 export function DriftMap({ route }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
-  const mapKey = process.env.NEXT_PUBLIC_MAPTILER_KEY;
+  const [mapFailed, setMapFailed] = useState(false);
   const geometryKey = useMemo(() => route?.geometry.coordinates.flat().join(",") ?? "", [route]);
 
   useEffect(() => {
-    if (!mapKey || !route || !containerRef.current) return;
+    if (!route || !containerRef.current) return;
+    setMapFailed(false);
     let cancelled = false;
 
     import("maplibre-gl").then((maplibregl) => {
@@ -91,7 +81,7 @@ export function DriftMap({ route }: Props) {
       const bounds = boundsFor(coordinates);
       const map = new maplibregl.Map({
         container: containerRef.current,
-        style: `https://api.maptiler.com/maps/streets-v2/style.json?key=${mapKey}`,
+        style: MAP_STYLE,
         center: route.start.coordinates,
         zoom: 13,
         attributionControl: false,
@@ -100,7 +90,6 @@ export function DriftMap({ route }: Props) {
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
       let routeAdded = false;
-      let usingFallback = false;
       const addRoute = () => {
         if (routeAdded) return;
         routeAdded = true;
@@ -119,12 +108,7 @@ export function DriftMap({ route }: Props) {
       map.on("load", addRoute);
       map.on("error", (event) => {
         const message = event.error?.message?.toLowerCase() ?? "";
-        if (mapKey && !usingFallback && /401|403|404|style|tile|source/.test(message)) {
-          usingFallback = true;
-          routeAdded = false;
-          map.setStyle(osmStyle);
-          map.once("style.load", addRoute);
-        }
+        if (/style|source|tile|network|403|404|401/.test(message)) setMapFailed(true);
       });
     });
 
@@ -133,11 +117,11 @@ export function DriftMap({ route }: Props) {
       mapRef.current?.remove();
       mapRef.current = null;
     };
-  }, [mapKey, route, geometryKey]);
+  }, [route, geometryKey]);
 
   if (!route) {
     return <div className="map-empty"><span>LD</span><p>Your route will appear here.</p></div>;
   }
-  if (!mapKey) return <PreviewMap route={route} />;
+  if (mapFailed) return <PreviewMap route={route} />;
   return <div ref={containerRef} className="live-map" aria-label="Interactive route map" />;
 }
