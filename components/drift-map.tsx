@@ -121,6 +121,9 @@ export function DriftMap({ route }: Props) {
         const message = event.error?.message?.toLowerCase() ?? "";
         if (/style|source|tile|network|403|404|401/.test(message)) setMapFailed(true);
       });
+      window.setTimeout(() => {
+        if (!map.areTilesLoaded()) setMapFailed(true);
+      }, 7_000);
     });
 
     return () => {
