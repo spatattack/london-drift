@@ -34,6 +34,23 @@ type OverpassElement = {
 
 type OverpassBody = { elements?: OverpassElement[] };
 
+type NearbyPlace = { name: string; tags: Record<string, string> };
+type NominatimReverseBody = { name?: string; display_name?: string; address?: { road?: string; neighbourhood?: string; suburb?: string } };
+
+const modePlaceSignals: Record<DriftMode, { keys: string[]; keywords: string[]; label: string }> = {
+  surprise: { keys: ["amenity", "tourism", "historic", "leisure", "shop"], keywords: ["market", "gallery", "yard"], label: "curiosity" },
+  quiet: { keys: ["leisure", "natural", "landuse"], keywords: ["garden", "park", "green", "cemetery"], label: "quiet wandering" },
+  architecture: { keys: ["building", "building:architecture", "historic", "heritage", "man_made"], keywords: ["hall", "warehouse", "station", "church", "court"], label: "architecture" },
+  water: { keys: ["waterway", "natural", "leisure"], keywords: ["canal", "lock", "river", "pond", "reservoir", "marina"], label: "water" },
+  old: { keys: ["historic", "heritage", "building", "place_of_worship"], keywords: ["old", "church", "chapel", "hall", "market", "court"], label: "old London" },
+  industrial: { keys: ["industrial", "man_made", "craft", "railway"], keywords: ["works", "yard", "arches", "depot", "factory", "rail"], label: "post-industrial texture" },
+  green: { keys: ["leisure", "natural", "landuse"], keywords: ["park", "garden", "common", "wood", "meadow", "green"], label: "green space" },
+  weird: { keys: ["artwork_type", "man_made", "historic", "railway", "amenity"], keywords: ["mural", "sculpture", "tower", "tunnel", "arches", "station", "market"], label: "weirdness" },
+  photography: { keys: ["tourism", "artwork_type", "man_made", "building", "natural"], keywords: ["viewpoint", "mural", "gallery", "bridge", "tower", "station"], label: "photography" },
+  pubs: { keys: ["amenity", "shop", "tourism"], keywords: ["pub", "tavern", "inn", "brewery", "bar", "market"], label: "a useful wander" },
+  night: { keys: ["amenity", "shop", "public_transport", "railway"], keywords: ["station", "market", "cinema", "theatre", "bar"], label: "night-time usefulness" },
+};
+
 const stopNotes = [
   "Take the less obvious side street here.",
   "A useful pause for texture and a change of scale.",
@@ -124,19 +141,37 @@ function previewLine(points: Coordinate[], desiredDistance: number) {
 
 async function reverseName(point: Coordinate, fallback: string) {
   const key = process.env.NEXT_PUBLIC_MAPTILER_KEY;
-  if (!key) return fallback;
+  if (key) {
+    try {
+      const response = await fetch(`https://api.maptiler.com/geocoding/${point[0]},${point[1]}.json?key=${encodeURIComponent(key)}&limit=1&language=en`, {
+        signal: AbortSignal.timeout(4_000),
+        next: { revalidate: 86_400 },
+      });
+      if (response.ok) {
+        const body = await response.json() as ReverseGeocodeBody;
+        const name = body.features?.[0]?.text || body.features?.[0]?.place_name?.split(",")[0];
+        if (name) return name;
+      }
+    } catch {
+      // Use the open fallback below when MapTiler is unavailable.
+    }
+  }
 
   try {
-    const response = await fetch(`https://api.maptiler.com/geocoding/${point[0]},${point[1]}.json?key=${encodeURIComponent(key)}&limit=1&language=en`, {
-      signal: AbortSignal.timeout(4_000),
+    const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${point[1]}&lon=${point[0]}&zoom=18`, {
+      headers: { "User-Agent": "LondonDrift/0.1 (non-commercial alpha)", "Accept-Language": "en" },
+      signal: AbortSignal.timeout(5_000),
       next: { revalidate: 86_400 },
     });
-    if (!response.ok) return fallback;
-    const body = await response.json() as ReverseGeocodeBody;
-    return body.features?.[0]?.text || body.features?.[0]?.place_name?.split(",")[0] || fallback;
+    if (response.ok) {
+      const body = await response.json() as NominatimReverseBody;
+      const name = body.name || body.address?.road || body.address?.neighbourhood || body.address?.suburb;
+      if (name) return name;
+    }
   } catch {
-    return fallback;
+    // Keep the stable fallback label when both geocoders are unavailable.
   }
+  return fallback;
 }
 
 function elementCoordinate(element: OverpassElement): Coordinate | null {
@@ -161,38 +196,61 @@ function placeScore(element: OverpassElement, point: Coordinate) {
   return categoryBonus + transitBonus - roadPenalty - distance;
 }
 
-async function nearbyPlaceName(point: Coordinate): Promise<string | null> {
+async function nearbyPlace(point: Coordinate): Promise<NearbyPlace | null> {
   const query = `[out:json][timeout:8];nwr(around:180,${point[1]},${point[0]})[name];out center tags 80;`;
-  try {
-    const response = await fetch("https://overpass-api.de/api/interpreter", {
-      method: "POST",
-      headers: { "Content-Type": "text/plain", "User-Agent": "LondonDrift/0.1 (non-commercial alpha)" },
-      body: query,
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (!response.ok) return null;
-    const body = await response.json() as OverpassBody;
-    const best = (body.elements ?? []).sort((a, b) => placeScore(b, point) - placeScore(a, point))[0];
-    const name = best?.tags?.name?.trim();
-    return name || null;
-  } catch {
-    return null;
+  for (const endpoint of ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain", "User-Agent": "LondonDrift/0.1 (non-commercial alpha)" },
+        body: query,
+        signal: AbortSignal.timeout(7_000),
+      });
+      if (!response.ok) continue;
+      const body = await response.json() as OverpassBody;
+      const best = (body.elements ?? []).sort((a, b) => placeScore(b, point) - placeScore(a, point))[0];
+      const name = best?.tags?.name?.trim();
+      if (name) return { name, tags: best?.tags ?? {} };
+    } catch {
+      // Try the next public Overpass instance.
+    }
   }
+  return null;
 }
 
-async function buildStops(coordinates: Coordinate[], duration: number) {
+function scorePlace(place: NearbyPlace | null, fallbackName: string, mode: DriftMode) {
+  const signal = modePlaceSignals[mode];
+  const tags = place?.tags ?? {};
+  const name = (place?.name ?? fallbackName).toLowerCase();
+  const keyMatch = signal.keys.some((key) => Boolean(tags[key]));
+  const keywordMatch = signal.keywords.some((keyword) => name.includes(keyword) || Object.values(tags).some((value) => value.toLowerCase().includes(keyword)));
+  const score = 48 + (keyMatch ? 24 : 0) + (keywordMatch ? 18 : 0) + (place ? 8 : 0);
+  return {
+    fitScore: Math.min(98, score),
+    fitReason: keyMatch || keywordMatch ? `A named place with a strong ${signal.label} signal.` : `A named place that adds texture to the ${signal.label} route.`,
+  };
+}
+
+async function buildStops(coordinates: Coordinate[], duration: number, mode: DriftMode) {
   const count = duration <= 30 ? 2 : duration <= 60 ? 3 : duration <= 90 ? 4 : 5;
   const raw = Array.from({ length: count }, (_, index) => {
     const progress = (index + 1) / (count + 1);
     return { progress, coordinates: pointAlongLine(coordinates, progress) };
   });
 
-  return Promise.all(raw.map(async ({ progress, coordinates }, index): Promise<DriftStop> => ({
-    name: await nearbyPlaceName(coordinates) ?? await reverseName(coordinates, `Drift marker ${index + 1}`),
-    note: stopNotes[index % stopNotes.length],
-    minute: Math.max(1, Math.round(duration * progress)),
-    coordinates,
-  })));
+  return Promise.all(raw.map(async ({ progress, coordinates }, index): Promise<DriftStop> => {
+    const place = await nearbyPlace(coordinates);
+    const fallbackName = await reverseName(coordinates, `Drift marker ${index + 1}`);
+    const name = place?.name ?? fallbackName;
+    const fit = scorePlace(place, name, mode);
+    return {
+      name,
+      note: stopNotes[index % stopNotes.length],
+      minute: Math.max(1, Math.round(duration * progress)),
+      coordinates,
+      ...fit,
+    };
+  }));
 }
 
 export async function generateDrift(start: PlaceSuggestion, duration: number, mode: DriftMode): Promise<DriftRoute> {
@@ -212,7 +270,7 @@ export async function generateDrift(start: PlaceSuggestion, duration: number, mo
   const coordinates = best?.coordinates ?? previewLine(candidateWaypoints(start.coordinates, duration, mode, 1), desiredDistance);
   const distance = Math.round(best?.distance ?? lineDistance(coordinates));
   const actualMinutes = Math.round(best ? best.duration / 60 : distance / WALKING_METRES_PER_MINUTE);
-  const stops = await buildStops(coordinates, actualMinutes);
+  const stops = await buildStops(coordinates, actualMinutes, mode);
   const endCoordinates = coordinates.at(-1)!;
   const end = await reverseName(endCoordinates, "Somewhere worth continuing from");
   const detail = modeDetails[mode];

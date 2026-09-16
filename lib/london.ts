@@ -15,6 +15,8 @@ export type DriftStop = {
   note: string;
   minute: number;
   coordinates: Coordinate;
+  fitScore: number;
+  fitReason: string;
 };
 
 export type DriftRoute = {

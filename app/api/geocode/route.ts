@@ -8,9 +8,51 @@ type MapTilerFeature = {
   center: [number, number];
 };
 
+type NominatimBody = {
+  lat?: string;
+  lon?: string;
+  name?: string;
+  display_name?: string;
+};
+
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
+  const latitude = Number(request.nextUrl.searchParams.get("lat"));
+  const longitude = Number(request.nextUrl.searchParams.get("lon"));
+  if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+    if (latitude < LONDON_BOUNDS.south || latitude > LONDON_BOUNDS.north || longitude < LONDON_BOUNDS.west || longitude > LONDON_BOUNDS.east) {
+      return NextResponse.json({ results: [], error: "That location is outside Greater London." }, { status: 400 });
+    }
+
+    const key = process.env.NEXT_PUBLIC_MAPTILER_KEY;
+    try {
+      if (key) {
+        const params = new URLSearchParams({ key, limit: "1", language: "en" });
+        const response = await fetch(`https://api.maptiler.com/geocoding/${longitude},${latitude}.json?${params}`, { signal: AbortSignal.timeout(5_000) });
+        if (response.ok) {
+          const body = await response.json() as { features?: MapTilerFeature[] };
+          const feature = body.features?.[0];
+          if (feature) {
+            return NextResponse.json({ results: [{ id: feature.id, name: feature.text || "Current location", context: feature.place_name?.split(",").slice(1).join(",").trim() || "London", coordinates: [longitude, latitude] as [number, number] }] });
+          }
+        }
+      }
+
+      const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=18`, {
+        headers: { "User-Agent": "LondonDrift/0.1 (non-commercial alpha)" },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (response.ok) {
+        const body = await response.json() as NominatimBody;
+        return NextResponse.json({ results: [{ id: "current-location", name: body.name || "My current location", context: body.display_name?.split(",").slice(1, 3).join(",").trim() || "London", coordinates: [longitude, latitude] as [number, number] }] });
+      }
+    } catch {
+      // Fall through to the stable current-location label.
+    }
+    return NextResponse.json({ results: [{ id: "current-location", name: "My current location", context: "London", coordinates: [longitude, latitude] as [number, number] }] });
+  }
+
   const query = request.nextUrl.searchParams.get("q")?.trim() ?? "";
   if (query.length < 2) return NextResponse.json({ results: [] });
 

@@ -45,22 +45,49 @@ export default function Home() {
     setError("");
   }
 
-  function locateMe() {
+  async function locateMe() {
+    setError("");
     if (!navigator.geolocation) {
       setError("This browser cannot share a location. Search for a station, address or neighbourhood instead.");
       return;
     }
+
+    if (!window.isSecureContext) {
+      setError("Location sharing needs a secure connection. Open the https://london-drift.vercel.app address and try again.");
+      return;
+    }
+
+    try {
+      const permission = await navigator.permissions?.query({ name: "geolocation" });
+      if (permission?.state === "denied") {
+        setError("Location permission is blocked for this site. Allow Location in your browser settings, then try again.");
+        return;
+      }
+    } catch {
+      // Some browsers do not expose the Permissions API; getCurrentPosition still works.
+    }
+
     setLocating(true);
     navigator.geolocation.getCurrentPosition(
-      ({ coords }) => {
-        chooseStart({ id: "current-location", name: "My current location", context: "London", coordinates: [coords.longitude, coords.latitude] });
-        setLocating(false);
+      async ({ coords }) => {
+        try {
+          const response = await fetch(`/api/geocode?lat=${coords.latitude}&lon=${coords.longitude}`);
+          const body = await response.json() as { results?: PlaceSuggestion[] };
+          const place = body.results?.[0] ?? { id: "current-location", name: "My current location", context: "London", coordinates: [coords.longitude, coords.latitude] as [number, number] };
+          chooseStart(place);
+        } catch {
+          chooseStart({ id: "current-location", name: "My current location", context: "London", coordinates: [coords.longitude, coords.latitude] as [number, number] });
+        } finally {
+          setLocating(false);
+        }
       },
-      () => {
+      (positionError) => {
         setLocating(false);
-        setError("Location was not available. Search for a station, address or neighbourhood instead.");
+        if (positionError.code === 1) setError("Location permission was denied. Allow Location for this site, then try again—or search for a place instead.");
+        else if (positionError.code === 3) setError("Location took too long to find. Try again, or search for a station, address or neighbourhood.");
+        else setError("Location was not available. Search for a station, address or neighbourhood instead.");
       },
-      { enableHighAccuracy: true, timeout: 8_000 },
+      { enableHighAccuracy: false, maximumAge: 300_000, timeout: 15_000 },
     );
   }
 
@@ -137,7 +164,7 @@ export default function Home() {
                   </div>
                 )}
               </div>
-              <button className="locate-button" type="button" onClick={locateMe} disabled={locating}><LocateFixed size={18} /> {locating ? "Locating…" : "Use my location"}</button>
+              <button className="locate-button" type="button" onClick={locateMe} disabled={locating} aria-busy={locating}><LocateFixed size={18} /> {locating ? "Finding you…" : "Use my location"}</button>
             </div>
           </div>
 
@@ -178,7 +205,7 @@ export default function Home() {
               </div>
               <div className="route-ends"><p><small>Start</small>{route.start.name}</p><ArrowRight size={18} /><p><small>Finish near</small>{route.end}</p></div>
               <ol className="stops">
-                {route.stops.map((stop, index) => <li key={`${stop.name}-${index}`}><span style={{ borderColor: modeDetails[route.mode].colour }}>{index + 1}</span><div><strong>{stop.name}</strong><p>{stop.note}</p></div><small>{stop.minute} min</small></li>)}
+                {route.stops.map((stop, index) => <li key={`${stop.name}-${index}`}><span style={{ borderColor: modeDetails[route.mode].colour }}>{index + 1}</span><div><strong>{stop.name}</strong><p>{stop.note}</p><p className="fit-reason">{stop.fitReason}</p></div><small className="stop-meta"><b>{stop.fitScore}% fit</b><span>{stop.minute} min</span></small></li>)}
               </ol>
               <div className="route-actions">
                 <button type="button" onClick={generate}><RefreshCw size={17} /> Another route</button>
