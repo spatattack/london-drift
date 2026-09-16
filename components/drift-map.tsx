@@ -70,7 +70,7 @@ function PreviewMap({ route }: { route: DriftRoute }) {
         const [x, y] = project(point);
         return <circle key={index} cx={x} cy={y} r="8" fill={index === 0 ? "#18221e" : colour} stroke="#fffaf0" strokeWidth="3" />;
       })}
-      <text x="28" y="474" className="preview-label">MAP PREVIEW · LIVE MAP DATA UNAVAILABLE</text>
+      <text x="28" y="474" className="preview-label">MAP PREVIEW · ROUTE GEOMETRY</text>
     </svg>
   );
 }
@@ -79,11 +79,13 @@ export function DriftMap({ route }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const [mapFailed, setMapFailed] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
   const geometryKey = useMemo(() => route?.geometry.coordinates.flat().join(",") ?? "", [route]);
 
   useEffect(() => {
     if (!route || !containerRef.current) return;
     setMapFailed(false);
+    setMapReady(false);
     let cancelled = false;
 
     import("maplibre-gl").then((maplibregl) => {
@@ -117,6 +119,7 @@ export function DriftMap({ route }: Props) {
         map.fitBounds([[bounds.west, bounds.south], [bounds.east, bounds.north]], { padding: 64, duration: 0 });
       };
       map.on("load", addRoute);
+      map.on("idle", () => setMapReady(true));
       map.on("error", (event) => {
         const message = event.error?.message?.toLowerCase() ?? "";
         if (/style|source|tile|network|403|404|401/.test(message)) setMapFailed(true);
@@ -137,5 +140,10 @@ export function DriftMap({ route }: Props) {
     return <div className="map-empty"><span>LD</span><p>Your route will appear here.</p></div>;
   }
   if (mapFailed) return <PreviewMap route={route} />;
-  return <div ref={containerRef} className="live-map" aria-label="Interactive route map" />;
+  return (
+    <div className="map-stage">
+      {!mapReady && <PreviewMap route={route} />}
+      <div ref={containerRef} className={`live-map ${mapReady ? "" : "map-loading"}`} aria-label="Interactive route map" />
+    </div>
+  );
 }
