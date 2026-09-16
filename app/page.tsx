@@ -207,6 +207,7 @@ export default function Home() {
               <ol className="stops">
                 {route.stops.map((stop, index) => <li key={`${stop.name}-${index}`}><span style={{ borderColor: modeDetails[route.mode].colour }}>{index + 1}</span><div><strong>{stop.name}</strong><p>{stop.note}</p><p className="fit-reason">{stop.fitReason}</p></div><small className="stop-meta"><b>{stop.fitScore}% fit</b><span>{stop.minute} min</span></small></li>)}
               </ol>
+              <p className="score-disclaimer">Fit scores are a lightweight guide based on nearby place data and the selected drift style.</p>
               <div className="route-actions">
                 <button type="button" onClick={generate}><RefreshCw size={17} /> Another route</button>
                 <button type="button" onClick={share}><Share2 size={17} /> {copied ? "Copied" : "Share"}</button>
