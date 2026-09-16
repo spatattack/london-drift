@@ -46,7 +46,11 @@ type OverpassBody = { elements?: OverpassElement[] };
 
 type NearbyPlace = { name: string; tags: Record<string, string>; coordinates: Coordinate; fitScore: number };
 type CandidatePlan = { points: Coordinate[]; places: Array<NearbyPlace | null> };
-type NominatimReverseBody = { name?: string; display_name?: string; address?: { road?: string; neighbourhood?: string; suburb?: string } };
+type NominatimReverseBody = {
+  name?: string;
+  display_name?: string;
+  address?: { road?: string; neighbourhood?: string; suburb?: string; city_district?: string };
+};
 
 const modePlaceSignals: Record<DriftMode, { keys: string[]; keywords: string[]; label: string }> = {
   surprise: { keys: ["amenity", "tourism", "historic", "leisure", "shop"], keywords: ["market", "gallery", "yard"], label: "curiosity" },
@@ -98,6 +102,27 @@ const modeStopNotes: Record<DriftMode, string[]> = {
   pubs: ["A useful door to remember, whether or not you stop now.", "Let the street decide whether this is a pause or a waypoint.", "Good territory for an unhurried detour."],
   night: ["Stay with the active, well-connected edge here.", "Use the lit frontage as the next anchor.", "A practical point to reassess the route after dark."],
 };
+
+const modeFallbackNames: Record<DriftMode, string[]> = {
+  surprise: ["An overlooked corner", "A useful interruption", "The less obvious way through"],
+  quiet: ["A quieter edge", "A pocket of calm", "The softer way through"],
+  architecture: ["An overlooked façade", "A change in scale", "A useful building line"],
+  water: ["A waterside turn", "The water's edge", "A change in reflection"],
+  old: ["An older street line", "A surviving detail", "A trace of old London"],
+  industrial: ["A working edge", "A piece of infrastructure", "The seam of the city"],
+  green: ["A green threshold", "A patch of breathing room", "The quieter green edge"],
+  weird: ["An unexplained corner", "A small London glitch", "The odd way through"],
+  photography: ["A change of viewpoint", "A layered sightline", "The wider frame"],
+  pubs: ["A useful detour", "A door worth remembering", "A possible pause"],
+  night: ["A lit junction", "An active edge", "A useful night-time anchor"],
+};
+
+function isGenericRoadName(name: string) {
+  const trimmed = name.trim();
+  return /(^|\s)[AM]\d+[A-Z]?\b/i.test(trimmed)
+    || /road \((?:england|great britain)\)/i.test(trimmed)
+    || /\b(?:road|street|avenue|lane|way|drive|close|terrace|crescent|gardens|place|square|walk)\s*$/i.test(trimmed);
+}
 
 function hash(input: string) {
   let value = 2166136261;
@@ -189,7 +214,7 @@ async function reverseName(point: Coordinate, fallback: string) {
       if (response.ok) {
         const body = await response.json() as ReverseGeocodeBody;
         const name = body.features?.[0]?.text || body.features?.[0]?.place_name?.split(",")[0];
-        if (name) return name;
+        if (name && !isGenericRoadName(name)) return name;
       }
     } catch {
       // Use the open fallback below when MapTiler is unavailable.
@@ -204,7 +229,14 @@ async function reverseName(point: Coordinate, fallback: string) {
     });
     if (response.ok) {
       const body = await response.json() as NominatimReverseBody;
-      const name = body.name || body.address?.road || body.address?.neighbourhood || body.address?.suburb;
+      const candidates = [
+        body.name,
+        body.address?.neighbourhood,
+        body.address?.suburb,
+        body.address?.city_district,
+        body.address?.road,
+      ];
+      const name = candidates.find((candidate) => candidate && !isGenericRoadName(candidate));
       if (name) return name;
     }
   } catch {
@@ -220,7 +252,7 @@ function elementCoordinate(element: OverpassElement): Coordinate | null {
 }
 
 function modeFitScore(name: string, tags: Record<string, string>, mode: DriftMode) {
-  if (tags.highway || tags.route === "road" || /(^|\s)[AM]\d+\b|road \(great britain\)/i.test(name)) return 0;
+  if (tags.highway || tags.route === "road" || isGenericRoadName(name)) return 0;
   const signal = modePlaceSignals[mode];
   const searchable = `${name} ${Object.values(tags).join(" ")}`.toLowerCase();
   const keyMatches = signal.keys.filter((key) => Boolean(tags[key])).length;
@@ -231,6 +263,7 @@ function modeFitScore(name: string, tags: Record<string, string>, mode: DriftMod
 }
 
 async function themedPlaces(origin: Coordinate, radius: number, mode: DriftMode): Promise<NearbyPlace[]> {
+  const collected = new Map<string, NearbyPlace>();
   const mapTilerKey = process.env.NEXT_PUBLIC_MAPTILER_KEY;
   if (mapTilerKey) {
     const latRadius = radius / 111_320;
@@ -260,15 +293,14 @@ async function themedPlaces(origin: Coordinate, radius: number, mode: DriftMode)
           const irrelevantBusiness = /pizza|restaurant|café|cafe|coffee|takeaway|pharmacy|supermarket|convenience/i.test(name);
           if (irrelevantBusiness && !["surprise", "pubs", "night"].includes(mode)) return [];
           const tags = { tourism: "poi", search: keyword, category: feature.properties?.category ?? "" };
-          return [{ name, coordinates, tags, fitScore: modeFitScore(name, tags, mode) }];
+          const fitScore = modeFitScore(name, tags, mode);
+          return fitScore >= 38 ? [{ name, coordinates, tags, fitScore }] : [];
         });
       } catch {
         return [];
       }
     }));
-    const unique = new Map<string, NearbyPlace>();
-    for (const place of results.flat()) unique.set(place.name.toLowerCase(), place);
-    if (unique.size > 0) return [...unique.values()].sort((a, b) => b.fitScore - a.fitScore);
+    for (const place of results.flat()) collected.set(place.name.toLowerCase(), place);
   }
 
   const keys = [...new Set(modePlaceSignals[mode].keys)];
@@ -285,8 +317,6 @@ async function themedPlaces(origin: Coordinate, radius: number, mode: DriftMode)
       });
       if (!response.ok) continue;
       const body = await response.json() as OverpassBody;
-      const unique = new Map<string, NearbyPlace>();
-
       for (const element of body.elements ?? []) {
         const name = element.tags?.name?.trim();
         const coordinates = elementCoordinate(element);
@@ -297,16 +327,16 @@ async function themedPlaces(origin: Coordinate, radius: number, mode: DriftMode)
         const fitScore = modeFitScore(name, tags, mode);
         if (fitScore < 38) continue;
         const key = name.toLowerCase();
-        const existing = unique.get(key);
-        if (!existing || fitScore > existing.fitScore) unique.set(key, { name, tags, coordinates, fitScore });
+        const existing = collected.get(key);
+        if (!existing || fitScore > existing.fitScore) collected.set(key, { name, tags, coordinates, fitScore });
       }
 
-      return [...unique.values()].sort((a, b) => b.fitScore - a.fitScore).slice(0, 180);
+      return [...collected.values()].sort((a, b) => b.fitScore - a.fitScore).slice(0, 180);
     } catch {
       // Try the next public Overpass instance.
     }
   }
-  return [];
+  return [...collected.values()].sort((a, b) => b.fitScore - a.fitScore).slice(0, 180);
 }
 
 function selectPlacesForTargets(candidates: NearbyPlace[], targets: Coordinate[], seed: number) {
@@ -369,7 +399,10 @@ function progressNearPoint(coordinates: Coordinate[], point: Coordinate) {
 
 async function buildStops(coordinates: Coordinate[], duration: number, mode: DriftMode, plan: CandidatePlan) {
   const names = await Promise.all(plan.places.map((place, index) => (
-    place ? Promise.resolve(place.name) : reverseName(plan.points[index + 1], `Drift marker ${index + 1}`)
+    place ? Promise.resolve(place.name) : reverseName(
+      plan.points[index + 1],
+      modeFallbackNames[mode][index % modeFallbackNames[mode].length],
+    )
   )));
   const usedNames = new Set<string>();
   const stops: DriftStop[] = [];
@@ -378,7 +411,9 @@ async function buildStops(coordinates: Coordinate[], duration: number, mode: Dri
     const place = plan.places[index];
     const stopCoordinates = place?.coordinates ?? plannedPoint;
     let name = names[index];
-    if (usedNames.has(name.toLowerCase())) name = `Drift marker ${index + 1}`;
+    if (isGenericRoadName(name) || usedNames.has(name.toLowerCase())) {
+      name = modeFallbackNames[mode][index % modeFallbackNames[mode].length];
+    }
     usedNames.add(name.toLowerCase());
     const progress = progressNearPoint(coordinates, stopCoordinates);
     const fit = scorePlace(place, name, mode);
