@@ -6,6 +6,14 @@ import type { DriftRoute } from "@/lib/london";
 import { modeDetails } from "@/lib/london";
 
 type Props = { route: DriftRoute | null };
+type ProjectedRoute = {
+  width: number;
+  height: number;
+  path: string;
+  start: { x: number; y: number };
+  end: { x: number; y: number };
+  stops: { x: number; y: number }[];
+};
 
 const MAP_STYLE = {
   version: 8 as const,
@@ -83,11 +91,13 @@ export function DriftMap({ route }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const [mapFailed, setMapFailed] = useState(false);
+  const [projectedRoute, setProjectedRoute] = useState<ProjectedRoute | null>(null);
   const geometryKey = useMemo(() => route?.geometry.coordinates.flat().join(",") ?? "", [route]);
 
   useEffect(() => {
     if (!route || !containerRef.current) return;
     setMapFailed(false);
+    setProjectedRoute(null);
     let cancelled = false;
 
     import("maplibre-gl").then((maplibregl) => {
@@ -104,37 +114,34 @@ export function DriftMap({ route }: Props) {
       mapRef.current = map;
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+      const project = ([lng, lat]: number[]) => {
+        const point = map.project([lng, lat]);
+        return { x: point.x, y: point.y };
+      };
+      const updateProjectedRoute = () => {
+        if (cancelled) return;
+        const routePoints = coordinates.map(project);
+        const container = map.getContainer();
+        setProjectedRoute({
+          width: container.clientWidth,
+          height: container.clientHeight,
+          path: routePoints.map((point, index) => `${index === 0 ? "M" : "L"}${point.x} ${point.y}`).join(" "),
+          start: project(route.start.coordinates),
+          end: routePoints.at(-1)!,
+          stops: route.stops.map((stop) => project(stop.coordinates)),
+        });
+      };
       let routeAdded = false;
       const addRoute = () => {
         if (routeAdded) return;
         routeAdded = true;
-        map.addSource("drift-route", { type: "geojson", data: { type: "Feature", properties: {}, geometry: route.geometry } });
-        map.addLayer({
-          id: "drift-outline",
-          type: "line",
-          source: "drift-route",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": "#18221e", "line-width": 12, "line-opacity": 0.9 },
-        });
-        map.addLayer({
-          id: "drift-line",
-          type: "line",
-          source: "drift-route",
-          layout: { "line-cap": "round", "line-join": "round" },
-          paint: { "line-color": modeDetails[route.mode].colour, "line-width": 7, "line-opacity": 1 },
-        });
-        map.moveLayer("drift-outline");
-        map.moveLayer("drift-line");
-        new maplibregl.Marker({ color: "#18221e" }).setLngLat(route.start.coordinates).addTo(map);
-        route.stops.forEach((stop, index) => {
-          const marker = document.createElement("div");
-          marker.className = "map-number-marker";
-          marker.textContent = String(index + 1);
-          new maplibregl.Marker({ element: marker }).setLngLat(stop.coordinates).addTo(map);
-        });
         map.fitBounds([[bounds.west, bounds.south], [bounds.east, bounds.north]], { padding: 64, duration: 0 });
+        updateProjectedRoute();
       };
       map.on("load", addRoute);
+      map.on("move", updateProjectedRoute);
+      map.on("resize", updateProjectedRoute);
+      map.on("idle", updateProjectedRoute);
       map.on("error", (event) => {
         const message = event.error?.message?.toLowerCase() ?? "";
         if (/style|source|tile|network|403|404|401/.test(message)) setMapFailed(true);
@@ -159,6 +166,24 @@ export function DriftMap({ route }: Props) {
     <div className="map-stage">
       <PreviewMap route={route} />
       <div ref={containerRef} className="live-map" aria-label="Interactive route map" />
+      {projectedRoute && (
+        <svg
+          className="route-map-overlay"
+          viewBox={`0 0 ${projectedRoute.width} ${projectedRoute.height}`}
+          aria-hidden="true"
+        >
+          <path className="route-map-outline" d={projectedRoute.path} />
+          <path className="route-map-line" d={projectedRoute.path} style={{ stroke: modeDetails[route.mode].colour }} />
+          <circle className="route-map-end" cx={projectedRoute.end.x} cy={projectedRoute.end.y} r="8" style={{ fill: modeDetails[route.mode].colour }} />
+          <circle className="route-map-start" cx={projectedRoute.start.x} cy={projectedRoute.start.y} r="9" />
+          {projectedRoute.stops.map((point, index) => (
+            <g key={`${route.stops[index]?.name}-${index}`} className="route-map-stop">
+              <circle cx={point.x} cy={point.y} r="14" style={{ stroke: modeDetails[route.mode].colour }} />
+              <text x={point.x} y={point.y + 4} textAnchor="middle">{index + 1}</text>
+            </g>
+          ))}
+        </svg>
+      )}
     </div>
   );
 }
