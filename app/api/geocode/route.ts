@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { parseLatLonParams } from "@/lib/geocode-params";
 import { fallbackPlaces, LONDON_BOUNDS, type PlaceSuggestion } from "@/lib/london";
 
 type MapTilerFeature = {
@@ -18,9 +19,9 @@ type NominatimBody = {
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
-  const latitude = Number(request.nextUrl.searchParams.get("lat"));
-  const longitude = Number(request.nextUrl.searchParams.get("lon"));
-  if (Number.isFinite(latitude) && Number.isFinite(longitude)) {
+  const location = parseLatLonParams(request.nextUrl.searchParams);
+  if (location) {
+    const { latitude, longitude } = location;
     if (latitude < LONDON_BOUNDS.south || latitude > LONDON_BOUNDS.north || longitude < LONDON_BOUNDS.west || longitude > LONDON_BOUNDS.east) {
       return NextResponse.json({ results: [], error: "That location is outside Greater London." }, { status: 400 });
     }
